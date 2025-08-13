@@ -49,7 +49,7 @@ function App() {
   // Initialize socket
   useEffect(() => {
     const savedUserId = localStorage.getItem('userId');
-    const newSocket = io('http://localhost:3001', {
+    const newSocket = io({
       query: savedUserId ? { userId: savedUserId } : {}
     });
 
