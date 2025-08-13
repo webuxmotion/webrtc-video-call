@@ -19,6 +19,7 @@ function App() {
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
   const peerConnectionRef = useRef(null);
+  const targetUserRef = useRef('');
 
   const iceServers = {
     iceServers: [
@@ -30,73 +31,56 @@ function App() {
     ]
   };
 
+  // Initialize local media
   useEffect(() => {
-    const savedUserId = localStorage.getItem('userId');
-    if (savedUserId) {
-      setUserId(savedUserId);
-    }
-
     const getLocalMedia = async () => {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: true,
-          audio: true
-        });
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
         setLocalStream(stream);
-        if (localVideoRef.current) {
-          localVideoRef.current.srcObject = stream;
-        }
-      } catch (error) {
-        console.error('Error accessing media devices:', error);
+        if (localVideoRef.current) localVideoRef.current.srcObject = stream;
+      } catch (err) {
+        console.error(err);
         showMessage('Could not access camera/microphone', 'error');
       }
     };
-
     getLocalMedia();
+  }, []);
 
+  // Initialize socket
+  useEffect(() => {
+    const savedUserId = localStorage.getItem('userId');
     const newSocket = io('http://localhost:3001', {
       query: savedUserId ? { userId: savedUserId } : {}
     });
+
     setSocket(newSocket);
 
-    newSocket.on('userId', (serverUserId) => {
-      setUserId(serverUserId);
-      localStorage.setItem('userId', serverUserId);
+    newSocket.on('userId', id => {
+      setUserId(id);
+      localStorage.setItem('userId', id);
     });
 
-    newSocket.on('newUserId', (newUserId) => {
-      setUserId(newUserId);
-      localStorage.setItem('userId', newUserId);
+    newSocket.on('newUserId', id => {
+      setUserId(id);
+      localStorage.setItem('userId', id);
       showMessage('New ID generated successfully!', 'success');
     });
 
-    newSocket.on('testResponse', () => {
-      showMessage('Connection test successful!', 'success');
-    });
+    newSocket.on('testResponse', () => showMessage('Connection test successful!', 'success'));
 
-    newSocket.on('incomingCall', (callerUserId) => {
-      setIncomingCall(callerUserId);
-    });
+    newSocket.on('incomingCall', callerId => setIncomingCall(callerId));
 
-    newSocket.on('callAnswered', async (answererUserId) => {
+    newSocket.on('callAnswered', async answererId => {
       setIsCalling(false);
       setIsInCall(true);
 
-      const pc = createPeerConnection(newSocket);
-      if (!pc) return;
+      if (!localStream) return;
 
-      try {
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
+      peerConnectionRef.current = createPeerConnection(newSocket, localStream, answererId);
+      const offer = await peerConnectionRef.current.createOffer();
+      await peerConnectionRef.current.setLocalDescription(offer);
 
-        newSocket.emit('offer', {
-          offer: offer,
-          targetUserId: answererUserId
-        });
-      } catch (error) {
-        console.error('Error creating/sending offer:', error);
-        showMessage('Error establishing call connection', 'error');
-      }
+      newSocket.emit('offer', { offer, targetUserId: answererId });
     });
 
     newSocket.on('callRejected', () => {
@@ -104,55 +88,38 @@ function App() {
       showMessage('Call was rejected', 'error');
     });
 
-    newSocket.on('offer', async (data) => {
+    newSocket.on('offer', async data => {
       setTargetUserId(data.callerUserId);
+      targetUserRef.current = data.callerUserId;
 
-      if (!peerConnectionRef.current) {
-        createPeerConnection(newSocket);
-      }
+      if (!localStream) return;
 
+      peerConnectionRef.current = createPeerConnection(newSocket, localStream, data.callerUserId);
+      await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(data.offer));
+      const answer = await peerConnectionRef.current.createAnswer();
+      await peerConnectionRef.current.setLocalDescription(answer);
+
+      newSocket.emit('answer', { answer, targetUserId: data.callerUserId });
+    });
+
+    newSocket.on('answer', async data => {
       if (peerConnectionRef.current) {
-        try {
-          await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(data.offer));
-          const answer = await peerConnectionRef.current.createAnswer();
-          await peerConnectionRef.current.setLocalDescription(answer);
-
-          newSocket.emit('answer', {
-            answer: answer,
-            targetUserId: data.callerUserId
-          });
-        } catch (error) {
-          console.error('Error handling offer:', error);
-          showMessage('Error establishing call connection', 'error');
-        }
+        await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(data.answer));
       }
     });
 
-    newSocket.on('answer', async (data) => {
-      if (peerConnectionRef.current) {
-        try {
-          await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(data.answer));
-        } catch (error) {
-          console.error('Error setting remote description:', error);
-          showMessage('Error establishing call connection', 'error');
-        }
-      }
-    });
-
-    newSocket.on('iceCandidate', async (data) => {
+    newSocket.on('iceCandidate', async data => {
       if (peerConnectionRef.current) {
         try {
           await peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(data.candidate));
-        } catch (error) {
-          console.error('Error adding ICE candidate:', error);
+        } catch (err) {
+          console.error('Error adding ICE candidate:', err);
         }
       }
     });
 
-    return () => {
-      newSocket.close();
-    };
-  }, []);
+    return () => newSocket.disconnect();
+  }, [localStream]);
 
   useEffect(() => {
     if (remoteStream && remoteVideoRef.current) {
@@ -160,30 +127,25 @@ function App() {
     }
   }, [remoteStream]);
 
-  const createPeerConnection = (socketInstance) => {
-    if (!socketInstance) return null;
-
+  const createPeerConnection = (socketInstance, localStreamParam, targetId) => {
     const pc = new RTCPeerConnection(iceServers);
     peerConnectionRef.current = pc;
+    targetUserRef.current = targetId;
 
-    pc.onconnectionstatechange = () => {};
-
-    if (localStream) {
-      localStream.getTracks().forEach(track => {
-        pc.addTrack(track, localStream);
-      });
+    if (localStreamParam) {
+      localStreamParam.getTracks().forEach(track => pc.addTrack(track, localStreamParam));
     }
 
-    pc.onicecandidate = (event) => {
-      if (event.candidate && targetUserId) {
+    pc.onicecandidate = event => {
+      if (event.candidate && targetUserRef.current) {
         socketInstance.emit('iceCandidate', {
           candidate: event.candidate,
-          targetUserId: targetUserId
+          targetUserId: targetUserRef.current
         });
       }
     };
 
-    pc.ontrack = (event) => {
+    pc.ontrack = event => {
       setRemoteStream(event.streams[0]);
     };
 
@@ -195,67 +157,43 @@ function App() {
       showMessage('Please enter a valid user ID', 'error');
       return;
     }
+    if (!socket) return showMessage('Not connected to server', 'error');
 
-    if (!socket) {
-      showMessage('Not connected to server', 'error');
-      return;
-    }
+    targetUserRef.current = targetUserId;
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: isVideoEnabled,
-        audio: isAudioEnabled
-      });
-
+      const stream = await navigator.mediaDevices.getUserMedia({ video: isVideoEnabled, audio: isAudioEnabled });
       setLocalStream(stream);
-      if (localVideoRef.current) {
-        localVideoRef.current.srcObject = stream;
-      }
+      if (localVideoRef.current) localVideoRef.current.srcObject = stream;
 
       socket.emit('call', targetUserId);
       setIsCalling(true);
-    } catch (error) {
-      console.error('Error starting call:', error);
-      showMessage('Error starting call: ' + error.message, 'error');
+    } catch (err) {
+      console.error(err);
+      showMessage('Error starting call: ' + err.message, 'error');
     }
   };
 
   const answerCall = async () => {
-    if (!incomingCall) return;
-
-    if (!socket) {
-      showMessage('Not connected to server', 'error');
-      return;
-    }
+    if (!incomingCall || !socket) return;
+    targetUserRef.current = incomingCall;
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: isVideoEnabled,
-        audio: isAudioEnabled
-      });
-
+      const stream = await navigator.mediaDevices.getUserMedia({ video: isVideoEnabled, audio: isAudioEnabled });
       setLocalStream(stream);
-      if (localVideoRef.current) {
-        localVideoRef.current.srcObject = stream;
-      }
+      if (localVideoRef.current) localVideoRef.current.srcObject = stream;
 
       socket.emit('answerCall', incomingCall);
       setIncomingCall(null);
       setIsInCall(true);
-    } catch (error) {
-      console.error('Error answering call:', error);
-      showMessage('Error answering call: ' + error.message, 'error');
+    } catch (err) {
+      console.error(err);
+      showMessage('Error answering call: ' + err.message, 'error');
     }
   };
 
   const rejectCall = () => {
-    if (!incomingCall) return;
-
-    if (!socket) {
-      showMessage('Not connected to server', 'error');
-      return;
-    }
-
+    if (!incomingCall || !socket) return;
     socket.emit('rejectCall', incomingCall);
     setIncomingCall(null);
   };
@@ -314,20 +252,17 @@ function App() {
     if (socket) {
       socket.emit('requestNewId');
       showMessage('Requesting new ID...', 'info');
-    } else {
-      showMessage('Not connected to server', 'error');
-    }
+    } else showMessage('Not connected to server', 'error');
   };
 
   const testConnection = () => {
     if (socket) {
       socket.emit('test', 'Hello from frontend!');
       showMessage('Testing connection...', 'info');
-    } else {
-      showMessage('Not connected to server', 'error');
-    }
+    } else showMessage('Not connected to server', 'error');
   };
 
+  // JSX remains unchanged
   return (
     <div className="App">
       <div className="container">

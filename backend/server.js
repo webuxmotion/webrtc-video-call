@@ -39,19 +39,19 @@ app.prepare().then(() => {
     
     // Check if user already has an ID in the request
     const existingUserId = socket.handshake.query.userId;
-    console.log('Query params:', socket.handshake.query);
-    console.log('Existing userId from query:', existingUserId);
+    // console.log('Query params:', socket.handshake.query);
+    // console.log('Existing userId from query:', existingUserId);
     
     let userId;
     
     if (existingUserId && userStore.userExists(existingUserId)) {
       // Reuse existing user ID
       userId = userStore.addUser(socket.id, existingUserId);
-      console.log('Reused existing userId:', userId);
+      //console.log('Reused existing userId:', userId);
     } else {
       // Generate new user ID
       userId = userStore.addUser(socket.id);
-      console.log('Generated new userId:', userId);
+      //console.log('Generated new userId:', userId);
     }
     
     // Send userId to client
@@ -65,7 +65,7 @@ app.prepare().then(() => {
 
     // Handle incoming call
     socket.on('call', (targetUserId) => {
-      console.log('Call request from', userId, 'to', targetUserId);
+      //console.log('Call request from', userId, 'to', targetUserId);
       
       const targetSocketId = userStore.getSocketById(targetUserId);
       if (targetSocketId) {
@@ -78,18 +78,18 @@ app.prepare().then(() => {
 
     // Handle call answer
     socket.on('answerCall', (callerUserId) => {
-      console.log('=== SERVER: answerCall received ===');
-      console.log('Answerer socket ID:', socket.id);
-      console.log('Answerer user ID:', userId);
-      console.log('Caller user ID:', callerUserId);
+      // console.log('=== SERVER: answerCall received ===');
+      // console.log('Answerer socket ID:', socket.id);
+      // console.log('Answerer user ID:', userId);
+      // console.log('Caller user ID:', callerUserId);
       
       const callerSocketId = userStore.getSocketById(callerUserId);
-      console.log('Caller socket ID found:', callerSocketId);
+      //console.log('Caller socket ID found:', callerSocketId);
       
       if (callerSocketId) {
-        console.log('Emitting callAnswered to caller...');
+
         socket.to(callerSocketId).emit('callAnswered', userId);
-        console.log('callAnswered event sent successfully');
+
       } else {
         console.log('Caller not found, cannot send callAnswered');
       }
@@ -107,8 +107,10 @@ app.prepare().then(() => {
 
     // Handle WebRTC signaling
     socket.on('offer', (data) => {
+
       const targetSocketId = userStore.getSocketById(data.targetUserId);
       if (targetSocketId) {
+
         socket.to(targetSocketId).emit('offer', {
           offer: data.offer,
           callerUserId: userId
@@ -117,8 +119,10 @@ app.prepare().then(() => {
     });
 
     socket.on('answer', (data) => {
+
       const targetSocketId = userStore.getSocketById(data.targetUserId);
       if (targetSocketId) {
+
         socket.to(targetSocketId).emit('answer', {
           answer: data.answer,
           answererUserId: userId
