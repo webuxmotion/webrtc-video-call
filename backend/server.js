@@ -1,185 +1,109 @@
+const express = require('express');
 const { createServer } = require('http');
 const { Server } = require('socket.io');
-const next = require('next');
+const path = require('path');
 const UserStore = require('./store');
 
-const dev = process.env.NODE_ENV !== 'production';
-const app = next({ dev });
-const handle = app.getRequestHandler();
+const app = express();
+const server = createServer(app);
+const io = new Server(server, {
+  cors: { origin: '*', methods: ['GET','POST'] }
+});
 
-// STUN and TURN servers for better connectivity
+const userStore = new UserStore();
+
+if (process.env.NODE_ENV === "production") {
+  app.use(express.static(path.join(__dirname, "../frontend/dist")));
+
+  app.get(/.*?/s, (req, res) => {
+    res.sendFile(path.join(__dirname, "../frontend", "dist", "index.html"));
+  });
+}
+
+// STUN servers для WebRTC
 const iceServers = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
     { urls: 'stun:stun2.l.google.com:19302' },
     { urls: 'stun:stun3.l.google.com:19302' },
-    { urls: 'stun:stun4.l.google.com:19302' },
-    // Add TURN servers here if you have them
-    // { urls: 'turn:your-turn-server.com:3478', username: 'username', credential: 'password' }
+    { urls: 'stun:stun4.l.google.com:19302' }
   ]
 };
 
-app.prepare().then(() => {
-  const server = createServer((req, res) => {
-    handle(req, res);
+// Socket.IO
+io.on('connection', (socket) => {
+  console.log('User connected:', socket.id);
+
+  let existingUserId = socket.handshake.query.userId;
+  let userId;
+
+  if (existingUserId && userStore.userExists(existingUserId)) {
+    userId = userStore.addUser(socket.id, existingUserId);
+  } else {
+    userId = userStore.addUser(socket.id);
+  }
+
+  socket.emit('userId', userId);
+
+  // Тест
+  socket.on('test', (data) => {
+    console.log('🧪 TEST EVENT RECEIVED:', data);
+    socket.emit('testResponse', 'Backend received test event!');
   });
 
-  const io = new Server(server, {
-    cors: {
-      origin: "*",
-      methods: ["GET", "POST"]
-    }
-  });
-
-  const userStore = new UserStore();
-
-  io.on('connection', (socket) => {
-    console.log('User connected:', socket.id);
-    
-    // Check if user already has an ID in the request
-    const existingUserId = socket.handshake.query.userId;
-    // console.log('Query params:', socket.handshake.query);
-    // console.log('Existing userId from query:', existingUserId);
-    
-    let userId;
-    
-    if (existingUserId && userStore.userExists(existingUserId)) {
-      // Reuse existing user ID
-      userId = userStore.addUser(socket.id, existingUserId);
-      //console.log('Reused existing userId:', userId);
+  // Call events
+  socket.on('call', (targetUserId) => {
+    const targetSocketId = userStore.getSocketById(targetUserId);
+    if (targetSocketId) {
+      socket.to(targetSocketId).emit('incomingCall', userId);
+      socket.emit('callStatus', 'calling');
     } else {
-      // Generate new user ID
-      userId = userStore.addUser(socket.id);
-      //console.log('Generated new userId:', userId);
+      socket.emit('callStatus', 'userNotFound');
     }
-    
-    // Send userId to client
-    socket.emit('userId', userId);
-
-    // Debug: Test if events are being received
-    socket.on('test', (data) => {
-      console.log('🧪 TEST EVENT RECEIVED:', data);
-      socket.emit('testResponse', 'Backend received test event!');
-    });
-
-    // Handle incoming call
-    socket.on('call', (targetUserId) => {
-      //console.log('Call request from', userId, 'to', targetUserId);
-      
-      const targetSocketId = userStore.getSocketById(targetUserId);
-      if (targetSocketId) {
-        socket.to(targetSocketId).emit('incomingCall', userId);
-        socket.emit('callStatus', 'calling');
-      } else {
-        socket.emit('callStatus', 'userNotFound');
-      }
-    });
-
-    // Handle call answer
-    socket.on('answerCall', (callerUserId) => {
-      // console.log('=== SERVER: answerCall received ===');
-      // console.log('Answerer socket ID:', socket.id);
-      // console.log('Answerer user ID:', userId);
-      // console.log('Caller user ID:', callerUserId);
-      
-      const callerSocketId = userStore.getSocketById(callerUserId);
-      //console.log('Caller socket ID found:', callerSocketId);
-      
-      if (callerSocketId) {
-
-        socket.to(callerSocketId).emit('callAnswered', userId);
-
-      } else {
-        console.log('Caller not found, cannot send callAnswered');
-      }
-    });
-
-    // Handle call rejection
-    socket.on('rejectCall', (callerUserId) => {
-      console.log('Call rejected by', userId, 'for', callerUserId);
-      
-      const callerSocketId = userStore.getSocketById(callerUserId);
-      if (callerSocketId) {
-        socket.to(callerSocketId).emit('callRejected', userId);
-      }
-    });
-
-    // Handle WebRTC signaling
-    socket.on('offer', (data) => {
-
-      const targetSocketId = userStore.getSocketById(data.targetUserId);
-      if (targetSocketId) {
-
-        socket.to(targetSocketId).emit('offer', {
-          offer: data.offer,
-          callerUserId: userId
-        });
-      }
-    });
-
-    socket.on('answer', (data) => {
-
-      const targetSocketId = userStore.getSocketById(data.targetUserId);
-      if (targetSocketId) {
-
-        socket.to(targetSocketId).emit('answer', {
-          answer: data.answer,
-          answererUserId: userId
-        });
-      }
-    });
-
-    socket.on('iceCandidate', (data) => {
-      const targetSocketId = userStore.getSocketById(data.targetUserId);
-      if (targetSocketId) {
-        socket.to(targetSocketId).emit('iceCandidate', {
-          candidate: data.candidate,
-          fromUserId: userId
-        });
-      }
-    });
-
-    // Handle new ID request
-    socket.on('requestNewId', () => {
-      console.log('🎯 REQUEST NEW ID EVENT RECEIVED!');
-      console.log('=== NEW ID REQUEST ===');
-      console.log('Socket ID:', socket.id);
-      console.log('Current userId:', userId);
-      
-      // Store the old ID for cleanup
-      const oldUserId = userId;
-      console.log('Old userId to remove:', oldUserId);
-      
-      // Remove old ID from userStore
-      userStore.removeUserId(oldUserId);
-      console.log('Removed old userId from store:', oldUserId);
-      
-      // Generate new ID and update the mapping
-      const newUserId = userStore.addUser(socket.id);
-      console.log('Generated new userId:', newUserId);
-      
-      // Update the local userId variable
-      userId = newUserId;
-      console.log('Updated local userId variable:', userId);
-      
-      // Send new ID to client
-      console.log('Emitting newUserId event to client with:', newUserId);
-      socket.emit('newUserId', newUserId);
-      
-      console.log('=== END NEW ID REQUEST ===');
-    });
-
-    // Handle disconnect
-    socket.on('disconnect', () => {
-      console.log('User disconnected:', socket.id);
-      userStore.removeUser(socket.id);
-    });
   });
 
-  const PORT = process.env.PORT || 3001;
-  server.listen(PORT, () => {
-    console.log(`> Ready on http://localhost:${PORT}`);
-    console.log('WebSocket server running on port', PORT);
+  socket.on('answerCall', (callerUserId) => {
+    const callerSocketId = userStore.getSocketById(callerUserId);
+    if (callerSocketId) socket.to(callerSocketId).emit('callAnswered', userId);
   });
+
+  socket.on('rejectCall', (callerUserId) => {
+    const callerSocketId = userStore.getSocketById(callerUserId);
+    if (callerSocketId) socket.to(callerSocketId).emit('callRejected', userId);
+  });
+
+  // WebRTC signaling
+  socket.on('offer', (data) => {
+    const targetSocketId = userStore.getSocketById(data.targetUserId);
+    if (targetSocketId) socket.to(targetSocketId).emit('offer', { offer: data.offer, callerUserId: userId });
+  });
+
+  socket.on('answer', (data) => {
+    const targetSocketId = userStore.getSocketById(data.targetUserId);
+    if (targetSocketId) socket.to(targetSocketId).emit('answer', { answer: data.answer, answererUserId: userId });
+  });
+
+  socket.on('iceCandidate', (data) => {
+    const targetSocketId = userStore.getSocketById(data.targetUserId);
+    if (targetSocketId) socket.to(targetSocketId).emit('iceCandidate', { candidate: data.candidate, fromUserId: userId });
+  });
+
+  // Генерація нового ID
+  socket.on('requestNewId', () => {
+    userStore.removeUserId(userId);
+    const newUserId = userStore.addUser(socket.id);
+    userId = newUserId;
+    socket.emit('newUserId', newUserId);
+  });
+
+  socket.on('disconnect', () => {
+    console.log('User disconnected:', socket.id);
+    userStore.removeUser(socket.id);
+  });
+});
+
+const PORT = process.env.PORT || 3001;
+server.listen(PORT, () => {
+  console.log(`Server running on http://localhost:${PORT}`);
 });
